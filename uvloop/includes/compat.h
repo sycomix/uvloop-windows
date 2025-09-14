@@ -1,11 +1,17 @@
+#ifndef UVLOOP_COMPAT_H
+#define UVLOOP_COMPAT_H
+
 #include <errno.h>
 #include <stddef.h>
 #include <signal.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include "Python.h"
 #include "uv.h"
 
+// Include platform-specific headers
+#ifndef _WIN32
+#include <sys/socket.h>
+#include <sys/un.h>
+#endif
 
 #ifndef EWOULDBLOCK
 #define EWOULDBLOCK EAGAIN
@@ -16,7 +22,6 @@
 #else
 #define PLATFORM_IS_APPLE 0
 #endif
-
 
 #ifdef __linux__
 #  define PLATFORM_IS_LINUX 1
@@ -30,7 +35,7 @@ int epoll_ctl(int epfd, int op, int fd, struct epoll_event *event) {
 };
 #endif
 
-
+#ifndef _WIN32
 PyObject *
 MakeUnixSockPyAddr(struct sockaddr_un *addr)
 {
@@ -53,7 +58,16 @@ MakeUnixSockPyAddr(struct sockaddr_un *addr)
         return PyUnicode_DecodeFSDefault(addr->sun_path);
     }
 }
-
+#else
+// Windows implementation - Unix domain sockets not supported
+PyObject *
+MakeUnixSockPyAddr(void *addr)
+{
+    PyErr_SetString(
+        PyExc_NotImplementedError, "Unix domain sockets are not supported on Windows");
+    return NULL;
+}
+#endif
 
 #if PY_VERSION_HEX < 0x03070100
 
@@ -103,3 +117,5 @@ _Py_RestoreSignals(void)
     PyOS_setsig(SIGXFSZ, SIG_DFL);
 #endif
 }
+
+#endif // UVLOOP_COMPAT_H

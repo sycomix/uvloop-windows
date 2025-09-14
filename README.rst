@@ -49,6 +49,12 @@ uvloop with::
 
     $ pip install -U pip
 
+Windows Support
+---------------
+
+Starting with version X.X.X, uvloop now supports Windows platforms.
+Note that Unix domain sockets are not supported on Windows.
+
 
 Using uvloop
 ------------
@@ -120,10 +126,19 @@ To build uvloop, you'll need Python 3.8 or greater:
 
 4. Build and run tests:
 
+   On Unix-like systems:
+   
    .. code::
 
     $ make
     $ make test
+
+   On Windows:
+   
+   .. code::
+
+    $ Makefile.bat compile
+    $ Makefile.bat test
 
 
 License

@@ -4,9 +4,6 @@ vi = sys.version_info
 if vi < (3, 8):
     raise RuntimeError('uvloop requires Python 3.8 or greater')
 
-if sys.platform in ('win32', 'cygwin', 'cli'):
-    raise RuntimeError('uvloop does not support Windows at the moment')
-
 import os
 import os.path
 import pathlib
@@ -36,7 +33,11 @@ def _libuv_build_env():
     if not re.search(r'-O\d', cur_cflags):
         cur_cflags += ' -O2'
 
-    env['CFLAGS'] = (cur_cflags + ' -fPIC ' + env.get('ARCHFLAGS', ''))
+    # Only add -fPIC on Unix-like systems, not on Windows
+    if sys.platform not in ('win32', 'cygwin'):
+        env['CFLAGS'] = (cur_cflags + ' -fPIC ' + env.get('ARCHFLAGS', ''))
+    else:
+        env['CFLAGS'] = cur_cflags + env.get('ARCHFLAGS', '')
 
     return env
 
@@ -132,15 +133,17 @@ class uvloop_build_ext(build_ext):
 
             directives = {}
             if self.cython_directives:
-                for directive in self.cython_directives.split(','):
-                    k, _, v = directive.partition('=')
-                    if v.lower() == 'false':
-                        v = False
-                    if v.lower() == 'true':
-                        v = True
+                if isinstance(self.cython_directives, str):
+                    for directive in self.cython_directives.split(','):
+                        k, _, v = directive.partition('=')
+                        if isinstance(v, str):
+                            if v.lower() == 'false':
+                                v = False
+                            elif v.lower() == 'true':
+                                v = True
 
-                    directives[k] = v
-                self.cython_directives = directives
+                        directives[k] = v
+                    self.cython_directives = directives
 
             self.distribution.ext_modules[:] = cythonize(
                 self.distribution.ext_modules,
@@ -164,30 +167,50 @@ class uvloop_build_ext(build_ext):
             shutil.rmtree(LIBUV_BUILD_DIR)
         shutil.copytree(LIBUV_DIR, LIBUV_BUILD_DIR)
 
-        # Sometimes pip fails to preserve the timestamps correctly,
-        # in which case, make will try to run autotools again.
-        subprocess.run(
-            ['touch', 'configure.ac', 'aclocal.m4', 'configure',
-             'Makefile.am', 'Makefile.in'],
-            cwd=LIBUV_BUILD_DIR, env=env, check=True)
-
-        if 'LIBUV_CONFIGURE_HOST' in env:
-            cmd = ['./configure', '--host=' + env['LIBUV_CONFIGURE_HOST']]
+        # Handle Windows builds with CMake
+        if sys.platform in ('win32', 'cygwin'):
+            # Use CMake for Windows builds
+            cmake_args = [
+                'cmake',
+                LIBUV_BUILD_DIR,
+                '-DLIBUV_BUILD_SHARED=OFF',  # Build static library
+            ]
+            
+            # Add build type if not specified
+            if not any(arg.startswith('-DCMAKE_BUILD_TYPE') for arg in cmake_args):
+                cmake_args.append('-DCMAKE_BUILD_TYPE=Release')
+            
+            # Run CMake configuration
+            subprocess.run(cmake_args, cwd=LIBUV_BUILD_DIR, check=True)
+            
+            # Build the library
+            subprocess.run(['cmake', '--build', LIBUV_BUILD_DIR, '--config', 'Release'], check=True)
         else:
-            cmd = ['./configure']
-        subprocess.run(
-            cmd,
-            cwd=LIBUV_BUILD_DIR, env=env, check=True)
+            # Unix-like systems use autotools
+            # Sometimes pip fails to preserve the timestamps correctly,
+            # in which case, make will try to run autotools again.
+            subprocess.run(
+                ['touch', 'configure.ac', 'aclocal.m4', 'configure',
+                 'Makefile.am', 'Makefile.in'],
+                cwd=LIBUV_BUILD_DIR, env=env, check=True)
 
-        try:
-            njobs = len(os.sched_getaffinity(0))
-        except AttributeError:
-            njobs = os.cpu_count()
-        j_flag = '-j{}'.format(njobs or 1)
-        c_flag = "CFLAGS={}".format(env['CFLAGS'])
-        subprocess.run(
-            ['make', j_flag, c_flag],
-            cwd=LIBUV_BUILD_DIR, env=env, check=True)
+            if 'LIBUV_CONFIGURE_HOST' in env:
+                cmd = ['./configure', '--host=' + env['LIBUV_CONFIGURE_HOST']]
+            else:
+                cmd = ['./configure']
+            subprocess.run(
+                cmd,
+                cwd=LIBUV_BUILD_DIR, env=env, check=True)
+
+            try:
+                njobs = len(os.sched_getaffinity(0))
+            except AttributeError:
+                njobs = os.cpu_count()
+            j_flag = '-j{}'.format(njobs or 1)
+            c_flag = "CFLAGS={}".format(env['CFLAGS'])
+            subprocess.run(
+                ['make', j_flag, c_flag],
+                cwd=LIBUV_BUILD_DIR, env=env, check=True)
 
     def build_extensions(self):
         if self.use_system_libuv:
@@ -198,7 +221,15 @@ class uvloop_build_ext(build_ext):
                 # Support macports on Mac OS X.
                 self.compiler.add_include_dir('/opt/local/include')
         else:
-            libuv_lib = os.path.join(LIBUV_BUILD_DIR, '.libs', 'libuv.a')
+            # Handle different library paths for Windows vs Unix
+            if sys.platform in ('win32', 'cygwin'):
+                libuv_lib = os.path.join(LIBUV_BUILD_DIR, 'Release', 'libuv.lib')
+                # Fallback for different CMake configurations
+                if not os.path.exists(libuv_lib):
+                    libuv_lib = os.path.join(LIBUV_BUILD_DIR, 'libuv.lib')
+            else:
+                libuv_lib = os.path.join(LIBUV_BUILD_DIR, '.libs', 'libuv.a')
+                
             if not os.path.exists(libuv_lib):
                 self.build_libuv()
             if not os.path.exists(libuv_lib):
@@ -207,14 +238,25 @@ class uvloop_build_ext(build_ext):
             self.extensions[-1].extra_objects.extend([libuv_lib])
             self.compiler.add_include_dir(os.path.join(LIBUV_DIR, 'include'))
 
+        # Platform-specific library linking
         if sys.platform.startswith('linux'):
             self.compiler.add_library('rt')
-        elif sys.platform.startswith(('freebsd', 'dragonfly')):
+        elif sys.platform.startswith(('freebsd', 'dragonfly')) or sys.platform.startswith('sunos'):
             self.compiler.add_library('kvm')
-        elif sys.platform.startswith('sunos'):
-            self.compiler.add_library('kstat')
-
-        self.compiler.add_library('pthread')
+        elif sys.platform in ('win32', 'cygwin'):
+            # Windows-specific libraries that libuv needs
+            self.compiler.add_library('psapi')
+            self.compiler.add_library('user32')
+            self.compiler.add_library('advapi32')
+            self.compiler.add_library('iphlpapi')
+            self.compiler.add_library('userenv')
+            self.compiler.add_library('ws2_32')
+            self.compiler.add_library('dbghelp')
+            self.compiler.add_library('ole32')
+            self.compiler.add_library('shell32')
+        else:
+            # For other Unix-like systems
+            self.compiler.add_library('pthread')
 
         super().build_extensions()
 

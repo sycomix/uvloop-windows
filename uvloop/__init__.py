@@ -5,8 +5,15 @@ import warnings as _warnings
 
 from asyncio.events import BaseDefaultEventLoopPolicy as __BasePolicy
 
-from . import includes as __includes  # NOQA
-from .loop import Loop as __BaseLoop  # NOQA
+# Handle platform-specific imports
+try:
+    from . import includes as __includes  # NOQA
+    from .loop import Loop as __BaseLoop  # NOQA
+    _uvloop_import_error = None
+except ImportError as e:
+    _uvloop_import_error = e
+    __BaseLoop = object  # type: ignore
+
 from ._version import __version__  # NOQA
 
 
@@ -22,6 +29,8 @@ class Loop(__BaseLoop, __asyncio.AbstractEventLoop):  # type: ignore[misc]
 
 def new_event_loop() -> Loop:
     """Return a new event loop."""
+    if _uvloop_import_error is not None:
+        raise RuntimeError("uvloop import failed") from _uvloop_import_error
     return Loop()
 
 
